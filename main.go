@@ -1,14 +1,23 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"sync"
 )
+
+type config struct {
+	pages              map[string]int
+	maxPages           int
+	baseURL            *url.URL
+	mu                 *sync.Mutex
+	concurrencyControl chan struct{}
+	wg                 *sync.WaitGroup
+}
 
 // isSameDomain checks if the current URL is on the same domain as the base URL.
 func isSameDomain(baseURL, currentURL string) bool {
@@ -23,14 +32,43 @@ func isSameDomain(baseURL, currentURL string) bool {
 	return base.Host == current.Host
 }
 
+func NewConfig(baseURL *url.URL, maxConcurrency int, maxPages int) *config {
+	return &config{
+		pages:              make(map[string]int),
+		maxPages:           maxPages,
+		baseURL:            baseURL,
+		mu:                 &sync.Mutex{},
+		concurrencyControl: make(chan struct{}, maxConcurrency),
+		wg:                 &sync.WaitGroup{},
+	}
+}
+
+func (cfg *config) addPageVisit(normalizedURL string) (isFirst bool) {
+	cfg.mu.Lock()
+	defer cfg.mu.Unlock()
+
+	if _, exists := cfg.pages[normalizedURL]; exists {
+		return false // URL has already been visited
+	}
+
+	cfg.pages[normalizedURL] = 1
+	return true // First time visiting this URL
+}
+
 // crawlPage recursively crawls the website starting from rawCurrentURL.
-func crawlPage(rawBaseURL, rawCurrentURL string, pages map[string]int, mu *sync.Mutex, depth int) {
-	if depth > 5 { // Set a reasonable depth limit
-		fmt.Printf("Skipping URL due to depth limit: %s\n", rawCurrentURL)
+func (cfg *config) crawlPage(rawCurrentURL string) {
+
+	cfg.concurrencyControl <- struct{}{}
+	defer func() {
+		<-cfg.concurrencyControl
+		cfg.wg.Done()
+	}()
+
+	if cfg.pageCount() >= cfg.maxPages {
 		return
 	}
 
-	fmt.Printf("Entering crawlPage with URL: %s (depth: %d)\n", rawCurrentURL, depth)
+	fmt.Printf("Entering crawlPage with URL: %s\n", rawCurrentURL)
 
 	normalizedURL, err := normalizeURL(rawCurrentURL)
 	if err != nil {
@@ -38,50 +76,42 @@ func crawlPage(rawBaseURL, rawCurrentURL string, pages map[string]int, mu *sync.
 		return
 	}
 
-	mu.Lock()
-	visited := false
-	if count, exists := pages[normalizedURL]; exists {
-		pages[normalizedURL] = count + 1
-		visited = true
-	}
-	if !visited {
-		pages[normalizedURL] = 1
-	}
-	mu.Unlock()
+	fmt.Printf("Normalized URL: %s\n", normalizedURL)
 
-	if visited {
+	isFirst := cfg.addPageVisit(normalizedURL)
+	if !isFirst {
 		fmt.Printf("Skipping URL (already visited): %s\n", normalizedURL)
 		return
 	}
 
-	fmt.Printf("Visiting URL: %s\n", normalizedURL)
-
+	fmt.Printf("Fetching HTML for URL: %s\n", normalizedURL)
 	htmlContent, err := getHTML(rawCurrentURL)
 	if err != nil {
 		fmt.Printf("Error fetching HTML from %s: %v\n", rawCurrentURL, err)
 		return
 	}
+
 	fmt.Println("Fetched HTML successfully.")
 
-	urls, err := getURLsFromHTML(htmlContent, rawBaseURL)
+	urls, err := getURLsFromHTML(htmlContent, cfg.baseURL.String())
 	if err != nil {
 		fmt.Printf("Error extracting URLs from HTML: %v\n", err)
 		return
 	}
-	fmt.Printf("Extracted %d URLs from %s\n", len(urls), rawCurrentURL)
 
-	// Release lock before making recursive calls
-	fmt.Println("Unlocked, beginning recursive calls")
+	fmt.Printf("Extracted %d URLs from %s\n", len(urls), rawCurrentURL)
 
 	for _, u := range urls {
 		fmt.Printf("Found URL: %s\n", u)
-		if isSameDomain(rawBaseURL, u) && u != rawCurrentURL {
+		if isSameDomain(cfg.baseURL.String(), u) && u != rawCurrentURL {
 			fmt.Printf("Recursively crawling URL: %s\n", u)
-			go crawlPage(rawBaseURL, u, pages, mu, depth+1) // Use goroutine to avoid blocking
+			cfg.wg.Add(1)
+			go cfg.crawlPage(u)
 		} else {
 			fmt.Printf("Skipping URL: %s\n", u)
 		}
 	}
+
 	fmt.Printf("Exiting crawlPage with URL: %s\n", rawCurrentURL)
 }
 
@@ -102,35 +132,48 @@ func getHTML(url string) (string, error) {
 	return string(body), nil
 }
 
+func (cfg *config) pageCount() int {
+	cfg.mu.Lock()
+	defer cfg.mu.Unlock()
+	return len(cfg.pages)
+}
+
 func main() {
-	baseURL := ""
-
-	// Define and parse command-line flags
-	flag.Parse()
-	args := flag.Args()
-
-	// Check the number of arguments
-	switch len(args) {
-	case 0:
-		fmt.Println("no website provided")
-		os.Exit(1)
-	case 1:
-		baseURL = args[0]
-		fmt.Printf("starting crawl of: %s\n", baseURL)
-	default:
-		fmt.Println("too many arguments provided")
-		os.Exit(1)
+	if len(os.Args) < 4 {
+		fmt.Println("Usage: ./crawler <baseURL> <maxConcurrency> <maxPages> ")
+		return
 	}
 
-	pages := make(map[string]int)
-	var mu sync.Mutex
+	baseURLStr := os.Args[1]
+	baseURL, err := url.Parse(baseURLStr)
+	if err != nil {
+		fmt.Printf("Invalid URL: %v\n", err)
+		return
+	}
 
-	fmt.Println("Starting crawl...")
-	crawlPage(baseURL, baseURL, pages, &mu, 0) // Start with depth 0
+	maxConcurrencyStr := os.Args[2]
+	maxPageStr := os.Args[3]
 
+	maxConcurrency, err := strconv.Atoi(maxConcurrencyStr)
+	if err != nil {
+		fmt.Println("Error converting string to int:", err)
+	}
+
+	maxPages, err := strconv.Atoi(maxPageStr)
+	if err != nil {
+		fmt.Println("Error converting string to int:", err)
+	}
+
+	cfg := NewConfig(baseURL, maxConcurrency, maxPages)
+
+	fmt.Println("starting crawl of:", baseURLStr)
+	cfg.wg.Add(1)
+	go cfg.crawlPage(baseURLStr)
+
+	cfg.wg.Wait()
 	fmt.Println("Crawl complete.")
 	fmt.Println("Crawled Pages:")
-	for url, count := range pages {
-		fmt.Printf("%s: %d\n", url, count)
+	for page, count := range cfg.pages {
+		fmt.Printf("%s: %d\n", page, count)
 	}
 }

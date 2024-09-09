@@ -11,18 +11,7 @@ func normalizeURL(rawURL string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-
-	parsedURL.Scheme = strings.ToLower(parsedURL.Scheme)
-	parsedURL.Host = strings.ToLower(parsedURL.Host)
-	parsedURL.Path = strings.TrimRight(parsedURL.Path, "/")
-
-	if parsedURL.Scheme == "http" && strings.HasSuffix(parsedURL.Host, ":80") {
-		parsedURL.Host = strings.TrimSuffix(parsedURL.Host, ":80")
-	} else if parsedURL.Scheme == "https" && strings.HasSuffix(parsedURL.Host, ":443") {
-		parsedURL.Host = strings.TrimSuffix(parsedURL.Host, ":443")
-	}
-
 	parsedURL.Fragment = ""
-
-	return parsedURL.String(), nil
+	parsedURL.RawQuery = ""
+	return strings.ToLower(parsedURL.String()), nil
 }
