@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"sync"
 )
@@ -17,6 +18,11 @@ type config struct {
 	mu                 *sync.Mutex
 	concurrencyControl chan struct{}
 	wg                 *sync.WaitGroup
+}
+
+type pageInfo struct {
+	URL   string
+	Count int
 }
 
 // isSameDomain checks if the current URL is on the same domain as the base URL.
@@ -138,6 +144,28 @@ func (cfg *config) pageCount() int {
 	return len(cfg.pages)
 }
 
+func printReport(pages map[string]int, baseURL string) {
+	var pageList []pageInfo
+	for url, count := range pages {
+		pageList = append(pageList, pageInfo{URL: url, Count: count})
+	}
+
+	sort.Slice(pageList, func(i, j int) bool {
+		if pageList[i].Count == pageList[j].Count {
+			return pageList[i].URL < pageList[j].URL
+		}
+		return pageList[i].Count > pageList[j].Count
+	})
+
+	fmt.Println("=============================")
+	fmt.Printf("  REPORT for %s\n", baseURL)
+	fmt.Println("=============================")
+
+	for _, page := range pageList {
+		fmt.Printf("Found %d internal links to %s\n", page.Count, page.URL)
+	}
+}
+
 func main() {
 	if len(os.Args) < 4 {
 		fmt.Println("Usage: ./crawler <baseURL> <maxConcurrency> <maxPages> ")
@@ -172,8 +200,9 @@ func main() {
 
 	cfg.wg.Wait()
 	fmt.Println("Crawl complete.")
-	fmt.Println("Crawled Pages:")
-	for page, count := range cfg.pages {
-		fmt.Printf("%s: %d\n", page, count)
-	}
+	//fmt.Println("Crawled Pages:")
+	//for page, count := range cfg.pages {
+	//fmt.Printf("%s: %d\n", page, count)
+	//}
+	printReport(cfg.pages, baseURLStr)
 }
